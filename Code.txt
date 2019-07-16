@@ -1,0 +1,391 @@
+#=================================================================
+#  clear R's memory and change the directory
+#=================================================================
+
+rm(list=ls())
+setwd('Please change the working directory')
+
+
+#=================================================================
+# To call packages
+#=================================================================
+
+pkgs <- c('tictoc','caret', 'lattice', 'ggplot2','foreach', 'iterators', 'parallel', 'doParallel','MLmetrics','DMwR','grid','ordinalNet')
+lapply(pkgs, require, character.only = T)
+
+
+#=================================================================
+# Load Data 
+#=================================================================
+
+##Read the data 
+data_train <- read.csv(paste('train.csv', sep=""),header=T)
+Unlabled_test <- read.csv(paste('test.csv', sep=""),header=T)
+
+
+### Summary
+summary(data_train[,-ncol(data_train)])
+
+
+## 2-d scatter plots
+#pairs(data_train[,-ncol(data_train)])
+
+
+
+##correlation matrix
+corr_matrix<-round(cor(data_train[,-ncol(data_train)]),2)
+
+
+#=================================================================
+# PCA
+#=================================================================
+
+#Perform PCA
+prin_comp <- prcomp(data_train[,-ncol(data_train)], scale. = T)
+
+# scree plots
+plot(1:16, prin_comp$sdev^2, type="c", main="A Scree Plot of PCA",
+     xlab="Principal Component",ylab="Proportion of Variance Explained")
+
+
+
+text(1:16, prin_comp$sdev^2, 
+     round(cumsum(prin_comp$sdev^2)/sum(prin_comp$sdev^2),3),cex=0.7)
+
+#Transform the training data to the new space
+data_pca <- data.frame(prin_comp$x[,1:8])
+data_pca$label <- data_train$label
+
+#Transform the unlabeled data to the new space
+Unlabled_test_PCA <- as.data.frame( predict( prin_comp, newdata = Unlabled_test ) )[,1:8]
+
+#=================================================================
+# XYplot of data
+#=================================================================
+
+xyplot(x[,1] ~ x[,2], prin_comp, groups = data_pca[,ncol(data_pca)], pch= 20,
+       grid = TRUE, auto.key = TRUE, xlab="First Prinicpal Component", 
+       ylab="Second Prinicpal Component")
+
+#++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+#Part 1
+#++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+#=================================================================
+# Build random forest model using the original data
+#=================================================================
+tic()
+cl <- makePSOCKcluster(5)
+registerDoParallel(cl)
+set.seed(5627)
+control <- trainControl(method="repeatedcv", number=10, repeats=3, search="grid", classProbs = TRUE, savePredictions = "final")
+
+
+myControl.ROC <- trainControl(method ="repeatedcv", 
+                              number = 10,
+                              repeats = 3,
+                              savePredictions = "final",
+                              summaryFunction = multiClassSummary,
+                              classProbs = TRUE,
+                              verboseIter = FALSE)
+
+tunegrid <- expand.grid(.mtry=c(1:5))
+
+
+RF_model <- train(make.names(label)~., data=data_train, method="rf", 
+                  metric="ROC", tuneGrid=tunegrid, trControl=myControl.ROC)
+
+
+stopCluster(cl)
+toc()
+
+#Confusion matrix for training data
+
+Confusion_matrix_RF <- confusionMatrix(table(data.frame(prediction = predict(RF_model, data_train), 
+                                                        actual = make.names(data_train$label))))
+
+
+#Predict the label for the test dataset (unlabaled dataset)
+predicted_labels_RF <- predict(RF_model, Unlabled_test)
+levels(predicted_labels_RF) <- c(1,2,3)
+#write 
+write.csv(predicted_labels_RF, file = "predicted_labels_1_withoutPCA.csv")
+
+#=================================================================
+# Build random forest model using the data from PCA (with the reduced dimmension)
+#=================================================================
+
+tic()
+cl <- makePSOCKcluster(5)
+registerDoParallel(cl)
+
+# Use the same seed to ensure same cross-validation splits
+myControl.ROC$seeds <- RF_model$control$seeds
+
+
+RF_model_PCA <- train(make.names(label)~., data=data_pca, method="rf", metric="ROC", tuneGrid=tunegrid, trControl=myControl.ROC)
+
+
+stopCluster(cl)
+toc()
+
+#Confusion matrix for training data
+
+Confusion_matrix_RF_PCA <- confusionMatrix(table(data.frame(prediction = predict(RF_model_PCA, data_pca), 
+                                                        actual = make.names(data_pca$label))))
+
+
+#Predict the label for the test dataset (unlabaled dataset)
+predicted_labels_RF_PCA <- predict(RF_model_PCA, Unlabled_test_PCA)
+levels(predicted_labels_RF_PCA) <- c(1,2,3)
+#write 
+write.csv(predicted_labels_RF_PCA, file = "predicted_labels_1_WithPCA.csv")
+
+#=================================================================
+# Build lasso regression using the data from PCA (with the reduced dimmension)
+#=================================================================
+
+#tic()
+#cl <- makePSOCKcluster(5)
+#registerDoParallel(cl)
+
+# Use the same seed to ensure same cross-validation splits
+#set.seed(1232)
+#lasso_ctrl <- trainControl(method ="repeatedcv", 
+#                              number = 10,
+#                              repeats = 3,
+#                              savePredictions = "final",
+#                              summaryFunction = multiClassSummary,
+#                              classProbs = TRUE,
+#                              verboseIter = FALSE)
+
+#rlGrid <- expand.grid( cost = c(200,2,0.02),
+#                       loss = c("L1", "L2_dual", "L2_primal"),
+#                       epsilon = c(0.001,0.01) )
+
+#Lasso_model_PCA <- train(make.names(label)~., data=data_pca, 
+#                             method = "regLogistic", 
+#                             trControl = lasso_ctrl,
+#                             metric = "ROC", 
+#                             preProc = c("center", "scale"),
+#                             tuneGrid = rlGrid)
+
+
+#stopCluster(cl)
+#toc()
+
+
+#Confusion matrix for training data
+
+#Confusion_matrix_Lasso_PCA <- confusionMatrix(table(data.frame(prediction = predict(Lasso_model_PCA, data_pca), 
+#                                                            actual = make.names(data_pca$label))))
+
+#=================================================================
+# Build SVM using the data from PCA (with the reduced dimmension)
+#=================================================================
+
+#tic()
+#cl <- makePSOCKcluster(5)
+#registerDoParallel(cl)
+
+# Use the same seed to ensure same cross-validation splits
+#set.seed(1567)
+#svm_ctrl <- trainControl(method ="repeatedcv", 
+#                              number = 10,
+#                              repeats = 3,
+#                              savePredictions = "final",
+#                              summaryFunction = multiClassSummary,
+#                              classProbs = TRUE,
+#                             verboseIter = FALSE)
+
+#SVM_model_PCA <- train(make.names(label)~., data=data_pca, 
+#                             method = "svmRadial", 
+#                             trControl = svm_ctrl,
+#                             metric = "ROC", 
+#                             preProc = c("center", "scale"))
+
+
+
+#stopCluster(cl)
+#toc()
+
+#Confusion matrix for training data
+
+#Confusion_matrix_SVM_PCA <- confusionMatrix(table(data.frame(prediction = predict(SVM_model_PCA, data_pca), 
+#                                                            actual = make.names(data_pca$label))))
+
+#++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+#Part 2
+#++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+tic()
+cl <- makePSOCKcluster(5)
+registerDoParallel(cl)
+set.seed(849)
+training <- data_pca
+
+cctrl1 <- trainControl(method = "cv", number = 3, returnResamp = "all",
+                       classProbs = TRUE, sampling = "down")
+
+ordinal_class <- train(make.names(label)~., data = training, 
+                       method ="ordinalNet", 
+                       trControl = cctrl1,
+                       metric = "Kappa")
+
+stopCluster(cl)
+toc()
+
+Confusion_matrix_ordinal_class_PCA <- confusionMatrix(table(data.frame(prediction = predict(ordinal_class, data_pca), 
+                                                                    actual = make.names(data_pca$label))))
+
+
+predicted_labels_Ordinal <- predict(ordinal_class, Unlabled_test_PCA)
+levels(predicted_labels_Ordinal) <- c(1,2,3)
+write.csv(predicted_labels_Ordinal, file = "predicted_labels_2.csv")
+
+#++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+#Part 3
+#++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+# Dealing with the unequal importance of different labels
+
+#=================================================================
+# Handling the issue using the weighted methods
+#=================================================================
+
+tic()
+cl <- makePSOCKcluster(5)
+registerDoParallel(cl)
+
+# Use the same seed to ensure same cross-validation splits
+myControl.ROC$seeds <- RF_model$control$seeds
+
+
+
+# Create model weights (Sum of them is one)
+model_weights <- ifelse(data_pca$label == 1,
+                        (1/table(data_pca$label)[1]) /3,
+                        ifelse (data_pca$label == 2,
+                               (1/table(data_pca$label)[2]) /3,
+                               (1/table(data_pca$label)[3]) /3))
+
+RF_model_PCA_weights <- train(make.names(label)~., data=data_pca, method="rf", metric="ROC", tuneGrid=tunegrid, trControl=myControl.ROC, weights = model_weights)
+
+
+stopCluster(cl)
+toc()
+
+
+#Confusion matrix for training data
+
+Confusion_matrix_RF_PCA_weights <- confusionMatrix(table(data.frame(prediction = predict(RF_model_PCA_weights, data_pca), 
+                                                            actual = make.names(data_pca$label))))
+
+
+#Predict the label for the test dataset (unlabaled dataset)
+predicted_labels_RF_PCA_weights <- predict(RF_model_PCA_weights, Unlabled_test_PCA)
+levels(predicted_labels_RF_PCA_weights) <- c(1,2,3)
+#write 
+write.csv(predicted_labels_RF_PCA_weights, file = "predicted_labels_3_weights.csv")
+
+
+#=================================================================
+# Handling the issue using down-sampling
+#=================================================================
+
+tic()
+cl <- makePSOCKcluster(5)
+registerDoParallel(cl)
+
+# Use the same seed to ensure same cross-validation splits
+myControl.ROC$seeds <- RF_model$control$seeds
+myControl.ROC$sampling <- "down"
+
+
+RF_model_PCA_down <- train(make.names(label)~., data=data_pca, method="rf", metric="ROC", tuneGrid=tunegrid, trControl=myControl.ROC)
+
+
+stopCluster(cl)
+toc()
+
+
+#Confusion matrix for training data
+
+Confusion_matrix_RF_PCA_down <- confusionMatrix(table(data.frame(prediction = predict(RF_model_PCA_down, data_pca), 
+                                                                    actual = make.names(data_pca$label))))
+
+
+#Predict the label for the test dataset (unlabaled dataset)
+predicted_labels_RF_PCA_down <- predict(RF_model_PCA_down, Unlabled_test_PCA)
+levels(predicted_labels_RF_PCA_down) <- c(1,2,3)
+#write 
+write.csv(predicted_labels_RF_PCA_down, file = "predicted_labels_3_down.csv")
+
+
+#=================================================================
+# Handling the issue using smote-sampling
+#=================================================================
+
+tic()
+cl <- makePSOCKcluster(5)
+registerDoParallel(cl)
+
+# Use the same seed to ensure same cross-validation splits
+myControl.ROC$seeds <- RF_model$control$seeds
+myControl.ROC$sampling <- "smote"
+
+
+RF_model_PCA_smote <- train(make.names(label)~., data=data_pca, method="rf", metric="ROC", tuneGrid=tunegrid, trControl=myControl.ROC)
+
+
+stopCluster(cl)
+toc()
+
+
+#Confusion matrix for training data
+
+Confusion_matrix_RF_PCA_smote <- confusionMatrix(table(data.frame(prediction = predict(RF_model_PCA_smote, data_pca), 
+                                                                 actual = make.names(data_pca$label))))
+
+
+#Predict the label for the test dataset (unlabaled dataset)
+predicted_labels_RF_PCA_smote <- predict(RF_model_PCA_smote, Unlabled_test_PCA)
+levels(predicted_labels_RF_PCA_smote) <- c(1,2,3)
+#write 
+write.csv(predicted_labels_RF_PCA_smote, file = "predicted_labels_3_smote.csv")
+
+#=================================================================
+# Handling the issue using up-sampling
+#=================================================================
+
+tic()
+cl <- makePSOCKcluster(5)
+registerDoParallel(cl)
+
+# Use the same seed to ensure same cross-validation splits
+myControl.ROC$seeds <- RF_model$control$seeds
+myControl.ROC$sampling <- "up"
+
+
+RF_model_PCA_UP <- train(make.names(label)~., data=data_pca, method="rf", metric="ROC", tuneGrid=tunegrid, trControl=myControl.ROC)
+
+
+stopCluster(cl)
+toc()
+
+
+#Confusion matrix for training data
+
+Confusion_matrix_RF_PCA_UP <- confusionMatrix(table(data.frame(prediction = predict(RF_model_PCA_UP, data_pca), 
+                                                                  actual = make.names(data_pca$label))))
+
+
+#Predict the label for the test dataset (unlabaled dataset)
+predicted_labels_RF_PCA_UP <- predict(RF_model_PCA_UP, Unlabled_test_PCA)
+levels(predicted_labels_RF_PCA_UP) <- c(1,2,3)
+#write 
+#write.csv(predicted_labels_RF_PCA_UP, file = "predicted_labels_3_UP.csv")
+
+
+
+
+
+
